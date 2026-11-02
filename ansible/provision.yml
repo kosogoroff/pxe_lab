@@ -1,0 +1,144 @@
+---
+- name: Configure PXE Server (pxeserver) on Ubuntu 24.04
+  hosts: pxeserver
+  become: true
+  vars:
+    # Параметры сети и путей
+    tftp_root: /srv/tftp
+    tftp_subdir: "{{ tftp_root }}/amd64"
+    images_dir: /srv/images
+    ks_dir: /srv/ks
+    
+    # URL для скачивания
+    netboot_url: "https://cdimage.ubuntu.com/ubuntu-server/noble/daily-live/current/noble-netboot-amd64.tar.gz"
+    iso_url: "https://cdimage.ubuntu.com/ubuntu-server/noble/daily-live/current/noble-live-server-amd64.iso"
+    
+    # IP адрес сервера (должен совпадать с настройками dnsmasq и Apache)
+    server_ip: "10.0.0.20"
+
+  tasks:
+    # 1. Отключить UFW
+    - name: Disable and stop UFW firewall
+      ansible.builtin.ufw:
+        state: disabled
+      ignore_errors: yes
+
+    # 2. Установить пакеты: dnsmasq, apache2, wget, tar
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - dnsmasq
+          - apache2
+          - wget
+          - tar
+        state: present
+        update_cache: yes
+
+    # 3. Создать директорию /srv/tftp
+    - name: Create TFTP root directory
+      ansible.builtin.file:
+        path: "{{ tftp_root }}"
+        state: directory
+        mode: '0755'
+
+    # 4. Скачать и распаковать netboot пакет
+    - name: Download netboot tarball
+      ansible.builtin.get_url:
+        url: "{{ netboot_url }}"
+        dest: "/tmp/noble-netboot-amd64.tar.gz"
+        mode: '0644'
+        timeout: 300
+      register: netboot_download
+      changed_when: netboot_download.changed
+
+    - name: Extract netboot files to TFTP root
+      ansible.builtin.unarchive:
+        src: "/tmp/noble-netboot-amd64.tar.gz"
+        dest: "{{ tftp_root }}"
+        remote_src: yes
+        creates: "{{ tftp_subdir }}/pxelinux.0"
+
+    # 5. Скопировать конфиг для загрузки ядра
+    - name: Copy PXE boot configuration file
+      ansible.builtin.copy:
+        src: files/default
+        dest: "{{ tftp_subdir }}/pxelinux.cfg/default"
+        mode: '0644'
+
+    # 6. Скопировать конфиг dnsmasq
+    - name: Copy dnsmasq configuration file
+      ansible.builtin.copy:
+        src: files/pxe.conf
+        dest: /etc/dnsmasq.d/pxe.conf
+        mode: '0644'
+      notify: Restart dnsmasq
+
+    # 7. Создать директорию /srv/images и скачать ISO
+    - name: Create images directory
+      ansible.builtin.file:
+        path: "{{ images_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Download Ubuntu ISO image
+      ansible.builtin.get_url:
+        url: "{{ iso_url }}"
+        dest: "{{ images_dir }}/noble-live-server-amd64.iso"
+        mode: '0644'
+        timeout: 600
+      register: iso_download
+      changed_when: iso_download.changed
+
+    # 8. Установить конфиг Apache и включить сайт
+    - name: Copy Apache VirtualHost configuration
+      ansible.builtin.copy:
+        src: files/ks-server.conf
+        dest: /etc/apache2/sites-available/ks-server.conf
+        mode: '0644'
+      notify: Reload apache2
+
+    - name: Enable Apache site and disable default
+      ansible.builtin.command: a2ensite ks-server.conf
+      args:
+        creates: /etc/apache2/sites-enabled/ks-server.conf
+      notify: Reload apache2
+
+    - name: Disable default Apache site
+      ansible.builtin.command: a2dissite 000-default.conf
+      args:
+        removes: /etc/apache2/sites-enabled/000-default.conf
+      notify: Reload apache2
+      ignore_errors: yes
+
+    # 9. Создать директорию /srv/ks и файлы для автоустановки
+    - name: Create Kickstart/Autoinstall directory
+      ansible.builtin.file:
+        path: "{{ ks_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy user-data (cloud-config)
+      ansible.builtin.copy:
+        src: files/user-data
+        dest: "{{ ks_dir }}/user-data"
+        mode: '0644'
+
+    - name: Copy meta-data
+      ansible.builtin.copy:
+        src: files/meta-data
+        dest: "{{ ks_dir }}/meta-data"
+        mode: '0644'
+
+    # 10. Перезапуск сервисов (через handlers)
+    # dnsmasq и apache2 будут перезапущены только если их конфиги изменились
+
+  handlers:
+    - name: Restart dnsmasq
+      ansible.builtin.systemd:
+        name: dnsmasq
+        state: restarted
+
+    - name: Reload apache2
+      ansible.builtin.systemd:
+        name: apache2
+        state: reloaded
