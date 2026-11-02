@@ -69,5 +69,3 @@ branch 'main' set up to track 'origin/main'.
 [admin_insta11@mv334 pxe_lab]$ 
 ```
 
-[admin_insta11@mv334 network_lab]$ 
-```
